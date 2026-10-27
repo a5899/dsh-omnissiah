@@ -1,11 +1,13 @@
 /**
- * Integration test: load the REAL @deepseek-ai/dsh-system-prompt and
- * @deepseek-ai/dsh-commands services from the shipped DeepSeek Harness and
- * confirm the opt-in contract holds inside genuine cordis services.
+ * Integration test: load the REAL @deepseek-ai/dsh-system-prompt service from
+ * the shipped DeepSeek Harness and confirm the opt-in contract holds inside
+ * genuine cordis services.
  *
- * The two properties that matter most here:
+ * The three properties that matter most here:
  *   1. Before activation the plugin contributes ZERO prompt bytes.
  *   2. After `/omnissiah on` the persona appears in the assembled prompt.
+ *   3. State is reconstructed from the harness' command lifecycle
+ *      (`command/run` + `command/done`), never from a private event type.
  *
  * This needs an unpacked copy of the DSH core packages, which is machine
  * specific and therefore NOT shipped with the repository. Point `DSH_CORE_DIR`
@@ -60,7 +62,7 @@ check("ctx.systemPrompt exposes section()", typeof ctx.systemPrompt?.section ===
 check("ctx.systemPrompt exposes getSectionOrder()", typeof ctx.systemPrompt?.getSectionOrder === "function");
 
 // A stand-in for the session-projection registry with the real contract:
-// register(definition) + stateOf(session, key), folding logged events.
+// register(definition) + stateOf(session, key), folding committed events.
 const events = new WeakMap();
 const sessionProjections = {
   register: (def) => {
@@ -93,14 +95,19 @@ ctx.inject = (deps, cb) => {
   return baseInject ? baseInject(deps, cb) : undefined;
 };
 
+const commit = (session, event) => {
+  const list = events.get(session) ?? [];
+  list.push(event);
+  events.set(session, list);
+};
+
 const makeSession = (messages = []) => {
   const s = {
     messages,
-    append: (type, data) => {
-      if (type !== "omnissiah/state") return;
-      const list = events.get(s) ?? [];
-      list.push({ type, data });
-      events.set(s, list);
+    // The plugin must never append a private event type; this mirror of the
+    // real corruption mechanism makes any such attempt fail loudly.
+    append: () => {
+      throw new Error("plugin must not append session events");
     }
   };
   events.set(s, []);
@@ -112,6 +119,25 @@ const makeSession = (messages = []) => {
 const { apply, SECTION_NAME } = await import(
   new URL("../lib/index.js", import.meta.url).href
 );
+
+/** Simulate the commands service lifecycle around one `/omnissiah` invocation. */
+function runCommand(session, rawInput) {
+  const commandId = `cmd-${(events.get(session) ?? []).length}`;
+  commit(session, {
+    type: "command/run",
+    data: { commandId, name: "omnissiah", args: rawInput, source: { kind: "user" } }
+  });
+  const result = registered.get("omnissiah").handler({ rawInput, agent: { session } });
+  commit(session, {
+    type: "command/done",
+    data: {
+      commandId,
+      kind: result.kind,
+      ...(result.text === undefined ? {} : { text: result.text })
+    }
+  });
+  return result;
+}
 
 let threw = null;
 try {
@@ -146,8 +172,7 @@ const session = makeSession([{ role: "user", content: "把 CI 构建时间从 8 
 
 console.log("\n[2] AFTER /omnissiah on: persona must appear");
 {
-  const cmd = registered.get("omnissiah");
-  const result = cmd.handler({ rawInput: "on", agent: { session } });
+  const result = runCommand(session, " on");
   check("command returns success", result.kind === "success", result.kind);
 
   const { rendered, assembled } = await renderFor(session);
@@ -159,6 +184,7 @@ console.log("\n[2] AFTER /omnissiah on: persona must appear");
   check("no unresolved {{artifact}}", !rendered.includes("{{artifact}}"));
   check("user request woven in", rendered.includes("CI 构建时间从 8 分钟"), "request missing");
   check("ambiguity rule present", rendered.includes("先向我确认"));
+  check("log carries only released event types", (events.get(session) ?? []).every((e) => e.type === "command/run" || e.type === "command/done"));
 }
 
 console.log("\n[3] per-session isolation against the real registry");
@@ -171,8 +197,7 @@ console.log("\n[3] per-session isolation against the real registry");
 
 console.log("\n[4] /omnissiah off restores silence");
 {
-  const cmd = registered.get("omnissiah");
-  const result = cmd.handler({ rawInput: "off", agent: { session } });
+  const result = runCommand(session, " off");
   check("off returns success", result.kind === "success", result.kind);
   const { rendered, assembled } = await renderFor(session);
   const ours = assembled.sections.find((s) => s.name === SECTION_NAME);
@@ -183,7 +208,8 @@ console.log("\n[4] /omnissiah off restores silence");
 console.log("\n[5] resumed session restores activation from the log");
 {
   const resumed = makeSession([{ role: "user", content: "恢复后的会话" }]);
-  resumed.append("omnissiah/state", { active: true, persona: "omnissiah" });
+  // Repaired v1.0.0 event: the marker is what lets a newer harness read the log.
+  commit(resumed, { type: "omnissiah/state", ignorable: true, data: { active: true, persona: "omnissiah" } });
   const { rendered } = await renderFor(resumed);
   check("logged activation replays on resume", rendered.includes("万机之神欧姆弥赛亚"));
 }

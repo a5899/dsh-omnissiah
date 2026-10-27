@@ -1,0 +1,18 @@
+# dsh-plugin-omnissiah — the bundle patch a DSH profile stacks when this
+# package is listed in its `dsh.profile.bundles`. `package.json` points here
+# through `dsh.bundle.patch`, which is what lets the plugin manager install,
+# enable, disable, and remove this plugin instead of a hand-written row.
+#
+# The layer inserts exactly one row: the host half of the plugin. It declares
+# no `dsh.client`, so no browser row is needed.
+#
+# `id` must stay equal to the full package name. The plugin manager matches
+# installed packages to rows by id, and dshmarket derives the same id from the
+# package name; a short id (e.g. `omnissiah`) would make either mount a second
+# copy of the plugin.
+- insert:
+    - id: dsh-plugin-omnissiah
+      name: dsh-plugin-omnissiah
+      config:
+        followUserRequest: true
+        # artifact: PERFORMANCE_OPTIMIZATION.md
